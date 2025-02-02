@@ -1,13 +1,16 @@
 package frc.robot.subsystems.drivetrain;
 
+import java.util.function.Supplier;
+
 import com.ctre.phoenix6.Utils;
 import com.ctre.phoenix6.swerve.SwerveDrivetrainConstants;
 import com.ctre.phoenix6.swerve.SwerveModuleConstants;
 import com.ctre.phoenix6.swerve.SwerveRequest;
+import com.ctre.phoenix6.swerve.jni.SwerveJNI;
 import com.pathplanner.lib.auto.AutoBuilder;
+
 import drivers.PhoenixSwerveHelper;
 import edu.wpi.first.math.VecBuilder;
-import edu.wpi.first.math.estimator.PoseEstimator;
 import edu.wpi.first.math.estimator.SwerveDrivePoseEstimator;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
@@ -23,17 +26,12 @@ import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import edu.wpi.first.wpilibj2.command.Subsystem;
-import edu.wpi.first.wpilibj2.command.sysid.SysIdRoutine;
 import frc.robot.Constants.FieldConstants;
 import frc.robot.LimelightHelpers;
-import frc.robot.Robot;
 import frc.robot.LimelightHelpers.PoseEstimate;
 import lombok.Getter;
-import java.util.function.Supplier;
-import java.util.logging.Logger;
 import util.AllianceFlipUtil;
 import util.RunnableUtil.RunOnce;
-import vision.LimelightVision.Limelight;
 import util.ScreamUtil;
 
 /**
@@ -42,8 +40,8 @@ import util.ScreamUtil;
  */
 public class Drivetrain extends frc.robot.subsystems.drivetrain.generated.TunerConstants.TunerSwerveDrivetrain implements Subsystem {
   private double lastSimTime;
-  public final SwerveDrivePoseEstimator m_PoseEstimate = new SwerveDrivePoseEstimator(getKinematics(), getPigeon2().getRotation2d(), getState().ModulePositions, new Pose2d());
 
+    public final SwerveDrivePoseEstimator m_PoseEstimate = new SwerveDrivePoseEstimator(getKinematics(), getPigeon2().getRotation2d(), getState().ModulePositions, new Pose2d());
   private RunOnce operatorPerspectiveApplier = new RunOnce();
 
   @Getter private final PhoenixSwerveHelper helper;
@@ -156,30 +154,16 @@ public class Drivetrain extends frc.robot.subsystems.drivetrain.generated.TunerC
     setControl(new SwerveRequest.Idle());
   }
 
-  public void addVisionPose(String limelight){
-    if(LimelightHelpers.getTV(limelight) 
-    && LimelightHelpers.getTA(limelight) >= 0.5 
-    && FieldConstants.FIELD_AREA.contains(m_PoseEstimate.getEstimatedPosition().getTranslation())){
-      m_PoseEstimate.addVisionMeasurement(LimelightHelpers.getBotPoseEstimate_wpiBlue(limelight).pose, LimelightHelpers.getLatency_Capture(limelight));
-    }
-  }
   public static final Field2d fieldWidget = new Field2d();
 
   @Override
   public void periodic() {
     attemptToSetPerspective();
-
-    m_PoseEstimate.update(getPigeon2().getRotation2d(), getState().ModulePositions);
-   // validateVisionMeasurement("limelight-front",LimelightHelpers.getBotPoseEstimate_wpiBlue("limelight-front") , m_PoseEstimate);
-    fieldWidget.setRobotPose(m_PoseEstimate.getEstimatedPosition());
-
-    addVisionPose("limelight-front");
     
-    fieldWidget.setRobotPose(m_PoseEstimate.getEstimatedPosition());
-    SmartDashboard.putNumber("Estimate Pose X", m_PoseEstimate.getEstimatedPosition().getX());
-    SmartDashboard.putNumber("Estimate Pose Y", m_PoseEstimate.getEstimatedPosition().getY());
+    validateVisionMeasurement("limelight-front");
+    fieldWidget.setRobotPose(getPose());
     SmartDashboard.putData("Field", fieldWidget);
-   
+    
     
   }
 
@@ -190,29 +174,30 @@ public class Drivetrain extends frc.robot.subsystems.drivetrain.generated.TunerC
         DriverStation.getAlliance().orElse(null));
   }
 
-      private static void validateVisionMeasurement(String limelight, PoseEstimate estimate, SwerveDrivePoseEstimator poseEstimator){
-        if (estimate.pose.getX() == 0.0 || !FieldConstants.FIELD_AREA.contains(estimate.pose.getTranslation())) {
-          return;
-        }
+   
+      private void validateVisionMeasurement(String limelight){
+        LimelightHelpers.SetRobotOrientation(limelight, getHeading().getDegrees(), getPigeon2().getAngularVelocityZWorld().getValueAsDouble(), 0, 0, 0, 0);
+        PoseEstimate poseEstimate = LimelightHelpers.getBotPoseEstimate_wpiBlue_MegaTag2(limelight);
 
-        double latency = LimelightHelpers.getLatency_Pipeline(limelight) + LimelightHelpers.getLatency_Capture(limelight);
-        latency = latency / 1000.0;
-
-        double poseDifference = poseEstimator.getEstimatedPosition().getTranslation()
-            .getDistance(estimate.pose.getTranslation());
-
-        if (estimate.tagCount != 0) {
-            double xyStds;
-            if (estimate.tagCount >= 2) {
-                xyStds = 0.3;
-            } else if (estimate.avgTagArea > 0.8 && poseDifference < 0.3) {
-                xyStds = 0.7;
-            } else if (estimate.avgTagArea < 0.1 && poseDifference < 0.9) {
-                xyStds = 0.7;
-            } else {
-                return;
-            }
-            poseEstimator.addVisionMeasurement(estimate.pose, Timer.getFPGATimestamp() - latency, VecBuilder.fill(xyStds, xyStds, 99999999));
-        }
+        if (poseEstimate == null
+        || poseEstimate.tagCount == 0
+        || !FieldConstants.FIELD_AREA.contains(poseEstimate.pose.getTranslation())
+        || Math.abs(getPigeon2().getAngularVelocityZWorld().getValueAsDouble()) > 540
+        || getLinearVelocity().getNorm() > 3.0) {
+      return;
     }
+
+        if(LimelightHelpers.getTV(limelight)){
+          System.out.println("Limelight: I have found a target!");
+        }
+
+        addVisionMeasurement(
+        poseEstimate.pose,
+        poseEstimate.timestampSeconds,
+        VecBuilder.fill(
+            Math.pow(0.5, poseEstimate.tagCount) * poseEstimate.avgTagDist * 2,
+            Math.pow(0.5, poseEstimate.tagCount) * poseEstimate.avgTagDist * 2,
+            9999999));
+    }
+            
 }
